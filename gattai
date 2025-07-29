@@ -1,0 +1,178 @@
+from flask import Flask, request, jsonify, abort
+import requests
+import os
+from dotenv import load_dotenv
+import json
+import hashlib
+
+load_dotenv()
+
+app = Flask(__name__)
+
+# ==== 環境変数と定数 ====
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbwLw3dZZau-lhAywa7Z-CQVJtMrAwouQ6C8ybGmYGqQfB-uzYS5PUSWY0O-qm2xPxdv/exec'
+VERIFICATION_TOKEN = "my-secret-token-1234567890-abcdefghij-XYZ123"  # eBay側と合わせる
+
+# ==== 翻訳結果をGASに返す関数 ====
+def send_translation_back_to_gas(original_text, translated_text):
+    headers = {'Content-Type': 'application/json'}
+    data = json.dumps({
+        'originalText': original_text,
+        'translatedText': translated_text
+    })
+    response = requests.post(GAS_WEB_APP_URL, headers=headers, data=data)
+    return response.status_code
+
+# ==== eBay challengeResponseの計算 ====
+def compute_challenge_response(challenge_code, verification_token, endpoint):
+    """
+    eBayのchallengeCodeに対するresponseを計算
+    SHA256(challengeCode + verificationToken + endpoint)
+    """
+    hash_input = challenge_code + verification_token + endpoint
+    hash_object = hashlib.sha256(hash_input.encode('utf-8'))
+    return hash_object.hexdigest()
+
+# ==== 翻訳APIエンドポイント ====
+@app.route("/translate", methods=["POST"])
+def translate():
+    data = request.get_json()
+    print("Data received:", data)
+    text = data.get("text")
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    gemini_url = (
+        "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
+
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": (
+                            "以下の日本語テキストを、eBayの商品紹介文として英語に翻訳してください。\n"
+                            "- 原文の意味やニュアンスをできるだけ忠実に保つこと\n"
+                            "- 不要な脚色や事実に反する追加表現を避けること\n"
+                            "- 英語として不自然にならない程度に表現を整えること\n"
+                            "- 商品紹介にふさわしい、読み手に伝わりやすく、親しみやすいトーンにすること\n"
+                            "- 読者に語りかけるような自然な英文にすること（This item is... / Perfect for... など）\n"
+                            "- 可能であれば商品の魅力や用途が伝わるような一文も加えること\n"
+                            "- 翻訳結果のみを出力してください。解説や複数候補は不要です。\n"
+                            "- 原文が複数文なら、英語も複数文にしてください。\n\n"
+                            f"日本語テキスト: {text}"
+                        )
+                    }
+                ]
+            }
+        ]
+    }
+
+    response = requests.post(gemini_url, json=payload, headers=headers)
+    if response.status_code != 200:
+        return jsonify({"error": "Gemini API failed", "details": response.text}), 500
+
+    gemini_response = response.json()
+    translation = gemini_response['candidates'][0]['content']['parts'][0]['text']
+
+    # 翻訳結果をGASに送信
+    send_translation_back_to_gas(text, translation)
+
+    return jsonify({"translation": translation})
+
+# ==== eBay MAD Webhook ====
+@app.route("/ebay-mad-webhook", methods=["GET", "POST"])
+def ebay_mad_webhook():
+    print("=== eBay Webhook received ===")
+    print("Request method:", request.method)
+    print("Request headers:")
+    for k, v in request.headers.items():
+        print(f"{k}: {v}")
+    print("Full request URL:", request.url)
+    print("Request path:", request.path)
+    print("Query string:", request.query_string.decode('utf-8'))
+    print("Query parameters:", dict(request.args))
+    print("Raw body:")
+    raw_body = request.data.decode("utf-8")
+    print(raw_body)
+
+    # エンドポイントURLを取得（eBayのchallenge計算に必要）
+    endpoint_url = request.url.split('?')[0]  # クエリパラメータを除いたURL
+    print(f"Endpoint URL: {endpoint_url}")
+
+    # challengeCodeを取得
+    challenge_code = None
+    if request.method == "GET":
+        challenge_code = request.args.get("challenge_code") or request.args.get("challengeCode")
+        print(f"Challenge code from query params: {challenge_code}")
+    else:  # POST
+        try:
+            data = request.get_json(force=True) or {}
+            challenge_code = data.get("challengeCode") or data.get("challenge_code")
+            print(f"Challenge code from JSON body: {challenge_code}")
+        except Exception as e:
+            print(f"JSON parse error: {e}")
+            data = request.form.to_dict() or {}
+            challenge_code = data.get("challengeCode") or data.get("challenge_code")
+            print(f"Challenge code from form data: {challenge_code}")
+
+    print(f"Final challenge code: '{challenge_code}'")
+
+    # challengeCodeが来た場合（エンドポイント検証）
+    if challenge_code:
+        print(f"Processing challenge code: {challenge_code}")
+        print(f"Using verification token: {VERIFICATION_TOKEN}")
+        print(f"Using endpoint URL: {endpoint_url}")
+        
+        # eBayの仕様に従ってchallengeResponseを計算
+        challenge_response = compute_challenge_response(challenge_code, VERIFICATION_TOKEN, endpoint_url)
+        
+        response_data = {"challengeResponse": challenge_response}
+        print(f"Computed challenge response: {challenge_response}")
+        print(f"Sending response: {response_data}")
+        return jsonify(response_data), 200
+
+    # challengeCodeがない場合は、とりあえずOKを返す（デバッグ用）
+    print("No challenge code found - returning OK for debugging")
+    
+    # verification tokenの確認（通常の通知の場合）
+    token = (request.headers.get("x-ebay-verification-token") or 
+             request.headers.get("X-EBAY-VERIFICATION-TOKEN") or
+             request.headers.get("X-Ebay-Verification-Token"))
+    
+    if token and token != VERIFICATION_TOKEN:
+        print(f"Invalid verification token: received='{token}', expected='{VERIFICATION_TOKEN}'")
+        abort(401)
+
+    # 通常の通知の場合またはデバッグの場合
+    print("Normal notification received or debug mode.")
+    return jsonify({"status": "received", "debug": True}), 200
+
+# ==== デバッグ用エンドポイント ====
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok", "message": "Server is running"}), 200
+
+@app.route("/test-challenge", methods=["GET"])
+def test_challenge():
+    """challengeResponseの計算をテストするエンドポイント"""
+    challenge_code = request.args.get("challenge_code", "test123")
+    endpoint_url = request.args.get("endpoint", "https://megumiru.pythonanywhere.com/ebay-mad-webhook")
+    
+    challenge_response = compute_challenge_response(challenge_code, VERIFICATION_TOKEN, endpoint_url)
+    
+    return jsonify({
+        "challengeCode": challenge_code,
+        "verificationToken": VERIFICATION_TOKEN,
+        "endpoint": endpoint_url,
+        "challengeResponse": challenge_response,
+        "calculation": f"SHA256({challenge_code} + {VERIFICATION_TOKEN} + {endpoint_url})"
+    }), 200
+
+# if __name__ == "__main__":
+#     app.run(debug=True)
