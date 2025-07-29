@@ -1,0 +1,52 @@
+function doPost(e) {
+
+  try {
+    const json = JSON.parse(e.postData.contents);
+    const originalText = json.originalText;
+    const translatedText = json.translatedText;
+
+    // console.log 的なログ出力（GASのログで確認できる）
+    Logger.log("🌐 Original Text: " + originalText);
+    Logger.log("📝 Translated Text: " + translatedText);
+
+    return ContentService.createTextOutput("Logged successfully.");
+  } catch (error) {
+    Logger.log("❌ Error: " + error);
+    return ContentService.createTextOutput("Error occurred.");
+  }
+}
+
+function onTranslateClick() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const cell = sheet.getActiveCell();
+  const text = cell.getValue();
+  Logger.log("翻訳対象テキスト: " + text);
+
+  const options = {
+    method: "post",
+    headers: { "Content-Type": "application/json" },
+    payload: JSON.stringify({ text: text }),
+    muteHttpExceptions: true,
+  };
+
+  const response = UrlFetchApp.fetch("https://megumiru.pythonanywhere.com/translate", options);
+
+  const responseCode = response.getResponseCode();
+  const responseText = response.getContentText();
+
+  Logger.log("HTTP Status: " + responseCode);
+  Logger.log("Response Text: " + responseText);
+
+  if (responseCode === 200) {
+    const result = JSON.parse(responseText);
+    const translated = result.translation;
+
+    // 翻訳結果を隣のセルに出力
+    sheet.getRange(cell.getRow(), cell.getColumn() + 1).setValue(translated);
+  } else {
+    // エラー内容をシートの隣のセルに表示
+    sheet.getRange(cell.getRow(), cell.getColumn() + 1).setValue("翻訳失敗: " + responseCode);
+  }
+}
+
+
