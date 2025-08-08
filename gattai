@@ -4,6 +4,19 @@ import os
 from dotenv import load_dotenv
 import json
 import hashlib
+import urllib.parse
+import time  # ← これが抜けている
+
+
+# pandasと datetimeは条件付きimport
+try:
+    import pandas as pd
+    from datetime import datetime, timedelta
+    PANDAS_AVAILABLE = True
+    print("pandas and datetime imported successfully")
+except ImportError as e:
+    print(f"Warning: pandas or datetime not available: {e}")
+    PANDAS_AVAILABLE = False
 
 load_dotenv()
 
@@ -14,15 +27,23 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbwLw3dZZau-lhAywa7Z-CQVJtMrAwouQ6C8ybGmYGqQfB-uzYS5PUSWY0O-qm2xPxdv/exec'
 VERIFICATION_TOKEN = "my-secret-token-1234567890-abcdefghij-XYZ123"  # eBay側と合わせる
 
+# eBay分析用の設定
+EBAY_APP_ID = os.getenv("EBAY_APP_ID")
+KEYWORDS = ["kimono", "samurai", "japanese tea set", "bonsai"]
+
 # ==== 翻訳結果をGASに返す関数 ====
 def send_translation_back_to_gas(original_text, translated_text):
-    headers = {'Content-Type': 'application/json'}
-    data = json.dumps({
-        'originalText': original_text,
-        'translatedText': translated_text
-    })
-    response = requests.post(GAS_WEB_APP_URL, headers=headers, data=data)
-    return response.status_code
+    try:
+        headers = {'Content-Type': 'application/json'}
+        data = json.dumps({
+            'originalText': original_text,
+            'translatedText': translated_text
+        })
+        response = requests.post(GAS_WEB_APP_URL, headers=headers, data=data)
+        return response.status_code
+    except Exception as e:
+        print(f"Error sending translation to GAS: {e}")
+        return None
 
 # ==== eBay challengeResponseの計算 ====
 def compute_challenge_response(challenge_code, verification_token, endpoint):
@@ -30,149 +51,507 @@ def compute_challenge_response(challenge_code, verification_token, endpoint):
     eBayのchallengeCodeに対するresponseを計算
     SHA256(challengeCode + verificationToken + endpoint)
     """
-    hash_input = challenge_code + verification_token + endpoint
-    hash_object = hashlib.sha256(hash_input.encode('utf-8'))
-    return hash_object.hexdigest()
+    try:
+        hash_input = challenge_code + verification_token + endpoint
+        hash_object = hashlib.sha256(hash_input.encode('utf-8'))
+        return hash_object.hexdigest()
+    except Exception as e:
+        print(f"Error computing challenge response: {e}")
+        return None
 
 # ==== 翻訳APIエンドポイント ====
 @app.route("/translate", methods=["POST"])
 def translate():
-    data = request.get_json()
-    print("Data received:", data)
-    text = data.get("text")
+    try:
+        data = request.get_json()
+        print("Data received:", data)
+        text = data.get("text")
 
-    if not text:
-        return jsonify({"error": "No text provided"}), 400
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
 
-    gemini_url = (
-        "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
-        f"?key={GEMINI_API_KEY}"
-    )
+        if not GEMINI_API_KEY:
+            return jsonify({"error": "Gemini API key not configured"}), 500
 
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": (
-                            "以下の日本語テキストを、eBayの商品紹介文として英語に翻訳してください。\n"
-                            "- 原文の意味やニュアンスをできるだけ忠実に保つこと\n"
-                            "- 不要な脚色や事実に反する追加表現を避けること\n"
-                            "- 英語として不自然にならない程度に表現を整えること\n"
-                            "- 商品紹介にふさわしい、読み手に伝わりやすく、親しみやすいトーンにすること\n"
-                            "- 読者に語りかけるような自然な英文にすること（This item is... / Perfect for... など）\n"
-                            "- 可能であれば商品の魅力や用途が伝わるような一文も加えること\n"
-                            "- 翻訳結果のみを出力してください。解説や複数候補は不要です。\n"
-                            "- 原文が複数文なら、英語も複数文にしてください。\n\n"
-                            f"日本語テキスト: {text}"
-                        )
-                    }
-                ]
-            }
-        ]
-    }
+        gemini_url = (
+            "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+            f"?key={GEMINI_API_KEY}"
+        )
 
-    response = requests.post(gemini_url, json=payload, headers=headers)
-    if response.status_code != 200:
-        return jsonify({"error": "Gemini API failed", "details": response.text}), 500
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": (
+                                "以下の日本語テキストを、eBayの商品紹介文として英語に翻訳してください。\n"
+                                "- 原文の意味やニュアンスをできるだけ忠実に保つこと\n"
+                                "- 不要な脚色や事実に反する追加表現を避けること\n"
+                                "- 英語として不自然にならない程度に表現を整えること\n"
+                                "- 商品紹介にふさわしい、読み手に伝わりやすく、親しみやすいトーンにすること\n"
+                                "- 読者に語りかけるような自然な英文にすること（This item is... / Perfect for... など）\n"
+                                "- 可能であれば商品の魅力や用途が伝わるような一文も加えること\n"
+                                "- 翻訳結果のみを出力してください。解説や複数候補は不要です。\n"
+                                "- 原文が複数文なら、英語も複数文にしてください。\n\n"
+                                f"日本語テキスト: {text}"
+                            )
+                        }
+                    ]
+                }
+            ]
+        }
 
-    gemini_response = response.json()
-    translation = gemini_response['candidates'][0]['content']['parts'][0]['text']
+        response = requests.post(gemini_url, json=payload, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"Gemini API error: {response.status_code}, {response.text}")
+            return jsonify({"error": "Gemini API failed", "details": response.text}), 500
 
-    # 翻訳結果をGASに送信
-    send_translation_back_to_gas(text, translation)
+        gemini_response = response.json()
+        translation = gemini_response['candidates'][0]['content']['parts'][0]['text']
 
-    return jsonify({"translation": translation})
+        # 翻訳結果をGASに送信
+        send_translation_back_to_gas(text, translation)
+
+        return jsonify({"translation": translation})
+
+    except Exception as e:
+        print(f"Error in translate endpoint: {e}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 # ==== eBay MAD Webhook ====
 @app.route("/ebay-mad-webhook", methods=["GET", "POST"])
 def ebay_mad_webhook():
-    print("=== eBay Webhook received ===")
-    print("Request method:", request.method)
-    print("Request headers:")
-    for k, v in request.headers.items():
-        print(f"{k}: {v}")
-    print("Full request URL:", request.url)
-    print("Request path:", request.path)
-    print("Query string:", request.query_string.decode('utf-8'))
-    print("Query parameters:", dict(request.args))
-    print("Raw body:")
-    raw_body = request.data.decode("utf-8")
-    print(raw_body)
+    try:
+        print("=== eBay Webhook received ===")
+        print("Request method:", request.method)
+        print("Request headers:")
+        for k, v in request.headers.items():
+            print(f"{k}: {v}")
+        print("Full request URL:", request.url)
+        print("Request path:", request.path)
+        print("Query string:", request.query_string.decode('utf-8'))
+        print("Query parameters:", dict(request.args))
+        print("Raw body:")
+        raw_body = request.data.decode("utf-8")
+        print(raw_body)
 
-    # エンドポイントURLを取得（eBayのchallenge計算に必要）
-    endpoint_url = request.url.split('?')[0]  # クエリパラメータを除いたURL
-    print(f"Endpoint URL: {endpoint_url}")
+        # エンドポイントURLを取得（eBayのchallenge計算に必要）
+        endpoint_url = request.url.split('?')[0]  # クエリパラメータを除いたURL
+        print(f"Endpoint URL: {endpoint_url}")
 
-    # challengeCodeを取得
-    challenge_code = None
-    if request.method == "GET":
-        challenge_code = request.args.get("challenge_code") or request.args.get("challengeCode")
-        print(f"Challenge code from query params: {challenge_code}")
-    else:  # POST
-        try:
-            data = request.get_json(force=True) or {}
-            challenge_code = data.get("challengeCode") or data.get("challenge_code")
-            print(f"Challenge code from JSON body: {challenge_code}")
-        except Exception as e:
-            print(f"JSON parse error: {e}")
-            data = request.form.to_dict() or {}
-            challenge_code = data.get("challengeCode") or data.get("challenge_code")
-            print(f"Challenge code from form data: {challenge_code}")
+        # challengeCodeを取得
+        challenge_code = None
+        if request.method == "GET":
+            challenge_code = request.args.get("challenge_code") or request.args.get("challengeCode")
+            print(f"Challenge code from query params: {challenge_code}")
+        else:  # POST
+            try:
+                data = request.get_json(force=True) or {}
+                challenge_code = data.get("challengeCode") or data.get("challenge_code")
+                print(f"Challenge code from JSON body: {challenge_code}")
+            except Exception as e:
+                print(f"JSON parse error: {e}")
+                data = request.form.to_dict() or {}
+                challenge_code = data.get("challengeCode") or data.get("challenge_code")
+                print(f"Challenge code from form data: {challenge_code}")
 
-    print(f"Final challenge code: '{challenge_code}'")
+        print(f"Final challenge code: '{challenge_code}'")
 
-    # challengeCodeが来た場合（エンドポイント検証）
-    if challenge_code:
-        print(f"Processing challenge code: {challenge_code}")
-        print(f"Using verification token: {VERIFICATION_TOKEN}")
-        print(f"Using endpoint URL: {endpoint_url}")
-        
-        # eBayの仕様に従ってchallengeResponseを計算
-        challenge_response = compute_challenge_response(challenge_code, VERIFICATION_TOKEN, endpoint_url)
-        
-        response_data = {"challengeResponse": challenge_response}
-        print(f"Computed challenge response: {challenge_response}")
-        print(f"Sending response: {response_data}")
-        return jsonify(response_data), 200
+        # challengeCodeが来た場合（エンドポイント検証）
+        if challenge_code:
+            print(f"Processing challenge code: {challenge_code}")
+            print(f"Using verification token: {VERIFICATION_TOKEN}")
+            print(f"Using endpoint URL: {endpoint_url}")
 
-    # challengeCodeがない場合は、とりあえずOKを返す（デバッグ用）
-    print("No challenge code found - returning OK for debugging")
-    
-    # verification tokenの確認（通常の通知の場合）
-    token = (request.headers.get("x-ebay-verification-token") or 
-             request.headers.get("X-EBAY-VERIFICATION-TOKEN") or
-             request.headers.get("X-Ebay-Verification-Token"))
-    
-    if token and token != VERIFICATION_TOKEN:
-        print(f"Invalid verification token: received='{token}', expected='{VERIFICATION_TOKEN}'")
-        abort(401)
+            # eBayの仕様に従ってchallengeResponseを計算
+            challenge_response = compute_challenge_response(challenge_code, VERIFICATION_TOKEN, endpoint_url)
 
-    # 通常の通知の場合またはデバッグの場合
-    print("Normal notification received or debug mode.")
-    return jsonify({"status": "received", "debug": True}), 200
+            response_data = {"challengeResponse": challenge_response}
+            print(f"Computed challenge response: {challenge_response}")
+            print(f"Sending response: {response_data}")
+            return jsonify(response_data), 200
+
+        # challengeCodeがない場合は、とりあえずOKを返す（デバッグ用）
+        print("No challenge code found - returning OK for debugging")
+
+        # verification tokenの確認（通常の通知の場合）
+        token = (request.headers.get("x-ebay-verification-token") or
+                 request.headers.get("X-EBAY-VERIFICATION-TOKEN") or
+                 request.headers.get("X-Ebay-Verification-Token"))
+
+        if token and token != VERIFICATION_TOKEN:
+            print(f"Invalid verification token: received='{token}', expected='{VERIFICATION_TOKEN}'")
+            abort(401)
+
+        # 通常の通知の場合またはデバッグの場合
+        print("Normal notification received or debug mode.")
+        return jsonify({"status": "received", "debug": True}), 200
+
+    except Exception as e:
+        print(f"Error in webhook endpoint: {e}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 # ==== デバッグ用エンドポイント ====
 @app.route("/health", methods=["GET"])
 def health_check():
-    return jsonify({"status": "ok", "message": "Server is running"}), 200
+    return jsonify({
+        "status": "ok",
+        "message": "Server is running",
+        "pandas_available": PANDAS_AVAILABLE,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "ebay_configured": bool(EBAY_APP_ID)
+    }), 200
 
 @app.route("/test-challenge", methods=["GET"])
 def test_challenge():
     """challengeResponseの計算をテストするエンドポイント"""
-    challenge_code = request.args.get("challenge_code", "test123")
-    endpoint_url = request.args.get("endpoint", "https://megumiru.pythonanywhere.com/ebay-mad-webhook")
-    
-    challenge_response = compute_challenge_response(challenge_code, VERIFICATION_TOKEN, endpoint_url)
-    
-    return jsonify({
-        "challengeCode": challenge_code,
-        "verificationToken": VERIFICATION_TOKEN,
-        "endpoint": endpoint_url,
-        "challengeResponse": challenge_response,
-        "calculation": f"SHA256({challenge_code} + {VERIFICATION_TOKEN} + {endpoint_url})"
-    }), 200
+    try:
+        challenge_code = request.args.get("challenge_code", "test123")
+        endpoint_url = request.args.get("endpoint", "https://megumiru.pythonanywhere.com/ebay-mad-webhook")
+
+        challenge_response = compute_challenge_response(challenge_code, VERIFICATION_TOKEN, endpoint_url)
+
+        return jsonify({
+            "challengeCode": challenge_code,
+            "verificationToken": VERIFICATION_TOKEN,
+            "endpoint": endpoint_url,
+            "challengeResponse": challenge_response,
+            "calculation": f"SHA256({challenge_code} + {VERIFICATION_TOKEN} + {endpoint_url})"
+        }), 200
+    except Exception as e:
+        print(f"Error in test-challenge endpoint: {e}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+# ==== eBay分析機能 ====
+def fetch_completed_items(keyword):
+    """eBay APIから完了したアイテムを取得"""
+    try:
+        print(f"Fetching completed items for keyword: {keyword}")
+
+        if not EBAY_APP_ID:
+            print("Error: EBAY_APP_ID is not set")
+            return []
+
+        url = (
+            "https://svcs.ebay.com/services/search/FindingService/v1"
+            "?OPERATION-NAME=findCompletedItems"
+            "&SERVICE-VERSION=1.0.0"
+            "&SECURITY-APPNAME=" + EBAY_APP_ID +
+            "&RESPONSE-DATA-FORMAT=JSON"
+            "&REST-PAYLOAD"
+            "&keywords=" + urllib.parse.quote(keyword) +
+            "&itemFilter(0).name=SoldItemsOnly"
+            "&itemFilter(0).value=true"
+            "&paginationInput.entriesPerPage=50"
+            "&GLOBAL-ID=EBAY-US"
+        )
+
+        print(f"eBay API URL: {url}")
+        r = requests.get(url, timeout=30)
+
+        if r.status_code != 200:
+            print(f"eBay API request failed: {r.status_code}")
+            return []
+
+        data = r.json()
+        print(f"API Response received for {keyword}")
+
+        # レスポンス構造を安全にチェック
+        try:
+            items = data.get("findCompletedItemsResponse", [])[0] \
+                         .get("searchResult", [])[0] \
+                         .get("item", [])
+        except (IndexError, KeyError, TypeError) as e:
+            print(f"Error parsing eBay response for {keyword}: {e}")
+            return []
+
+        results = []
+        for item in items:
+            try:
+                # 安全にデータを取得
+                end_time = None
+                try:
+                    end_time = item.get("listingInfo", [{}])[0].get("endTime", [None])[0]
+                except (IndexError, KeyError, TypeError):
+                    pass
+
+                price = None
+                try:
+                    price_str = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0].get("__value__")
+                    if price_str:
+                        price = float(price_str)
+                except (IndexError, KeyError, TypeError, ValueError):
+                    pass
+
+                title = None
+                try:
+                    title = item.get("title", [None])[0]
+                except (IndexError, KeyError, TypeError):
+                    pass
+
+                url_item = None
+                try:
+                    url_item = item.get("viewItemURL", [None])[0]
+                except (IndexError, KeyError, TypeError):
+                    pass
+
+                # 有効なデータのみ追加
+                if price is not None and title is not None:
+                    results.append({
+                        "keyword": keyword,
+                        "title": title,
+                        "price": price,
+                        "endTime": end_time,
+                        "url": url_item
+                    })
+
+            except Exception as e:
+                print(f"Error processing item: {e}")
+                continue
+
+        print(f"Successfully processed {len(results)} items for keyword: {keyword}")
+        return results
+
+    except Exception as e:
+        print(f"Error fetching completed items for keyword {keyword}: {e}")
+        return []
+
+def analyze_items(items):
+    """取得したアイテムデータを分析"""
+    try:
+        print(f"Analyzing {len(items)} items")
+
+        if not items:
+            return [], "データが取得できませんでした。API設定やキーワードを確認してください。"
+
+        # pandasが利用可能な場合は元のロジックを使用
+        if PANDAS_AVAILABLE:
+            try:
+                df = pd.DataFrame(items)
+                print(f"DataFrame created with {len(df)} rows")
+
+                # 無効なデータを除外
+                df = df.dropna(subset=['price'])
+                print(f"After price filtering: {len(df)} rows")
+
+                if df.empty:
+                    return [], "有効な価格データが見つかりませんでした。"
+
+                # 過去1か月に絞る（日付データがある場合のみ）
+                try:
+                    if 'endTime' in df.columns and not df['endTime'].isna().all():
+                        one_month_ago = datetime.utcnow() - timedelta(days=30)
+                        df["endTime"] = pd.to_datetime(df["endTime"], errors='coerce')
+                        df = df[df["endTime"] > one_month_ago]
+                        print(f"After date filtering: {len(df)} rows")
+                except Exception as e:
+                    print(f"Date filtering error: {e}")
+                    # 日付フィルタリングに失敗した場合は全データを使用
+
+                if df.empty:
+                    return [], "過去1か月間のデータが見つかりませんでした。"
+
+                # 平均価格ランキング
+                ranking = (
+                    df.groupby("keyword")["price"]
+                    .agg(["count", "mean", "max"])
+                    .sort_values("count", ascending=False)
+                    .reset_index()
+                )
+
+                # 分析コメント作成
+                if len(ranking) > 0:
+                    top_keyword = ranking.iloc[0]["keyword"]
+                    top_count = int(ranking.iloc[0]["count"])
+                    top_price = ranking.iloc[0]["mean"]
+                    analysis_text = (
+                        f"直近1か月で最も取引が多かった和商品は『{top_keyword}』で、{top_count}件の落札が確認されました。\n"
+                        f"平均価格は約${top_price:.2f}で、価格帯としては安定しています。"
+                    )
+                else:
+                    analysis_text = "分析対象のデータが不足しています。"
+
+                ranking_dict = ranking.to_dict(orient="records")
+                print(f"Analysis completed with pandas. Ranking: {ranking_dict}")
+
+                return ranking_dict, analysis_text
+
+            except Exception as e:
+                print(f"Pandas analysis failed: {e}, falling back to simple analysis")
+
+        # pandasが使えない場合、またはpandas処理が失敗した場合は簡単な分析
+        return analyze_items_simple(items)
+
+    except Exception as e:
+        print(f"Error in analyze_items: {e}")
+        return [], f"分析中にエラーが発生しました: {str(e)}"
+
+def analyze_items_simple(items):
+    """pandasを使わない簡単な分析"""
+    try:
+        print(f"Running simple analysis for {len(items)} items")
+
+        # キーワード別に集計
+        keyword_stats = {}
+
+        for item in items:
+            keyword = item["keyword"]
+            price = item["price"]
+
+            if keyword not in keyword_stats:
+                keyword_stats[keyword] = {
+                    "keyword": keyword,
+                    "prices": [],
+                    "count": 0
+                }
+
+            keyword_stats[keyword]["prices"].append(price)
+            keyword_stats[keyword]["count"] += 1
+
+        # 平均と最大値を計算
+        ranking = []
+        for keyword, stats in keyword_stats.items():
+            prices = stats["prices"]
+            if prices:
+                mean_price = sum(prices) / len(prices)
+                max_price = max(prices)
+
+                ranking.append({
+                    "keyword": keyword,
+                    "count": stats["count"],
+                    "mean": round(mean_price, 2),
+                    "max": round(max_price, 2)
+                })
+
+        # 件数でソート
+        ranking.sort(key=lambda x: x["count"], reverse=True)
+
+        # 分析コメント作成
+        if ranking:
+            top_item = ranking[0]
+            analysis_text = (
+                f"最も取引が多かった和商品は『{top_item['keyword']}』で、"
+                f"{top_item['count']}件の落札が確認されました。"
+                f"平均価格は約${top_item['mean']}でした。"
+            )
+        else:
+            analysis_text = "分析対象のデータが不足しています。"
+
+        print(f"Simple analysis completed. Rankings: {ranking}")
+        return ranking, analysis_text
+
+    except Exception as e:
+        print(f"Error in analyze_items_simple: {e}")
+        return [], f"簡易分析中にエラーが発生しました: {str(e)}"
+
+@app.route("/fetch_ebay_data", methods=["POST"])
+def fetch_ebay_data():
+    """eBayデータを取得・分析するエンドポイント"""
+    try:
+        print("=== fetch_ebay_data endpoint called ===")
+
+        # 環境変数の確認
+        if not EBAY_APP_ID:
+            print("Error: EBAY_APP_ID environment variable is not set")
+            return jsonify({
+                "error": "eBay API configuration error",
+                "message": "EBAY_APP_IDが設定されていません",
+                "ranking": [],
+                "analysis": "設定エラーです。",
+                "success": False
+            }), 200
+
+        print(f"Using EBAY_APP_ID: {EBAY_APP_ID[:10]}...")
+        print(f"Keywords to search: {KEYWORDS}")
+        print(f"Pandas available: {PANDAS_AVAILABLE}")
+
+        all_items = []
+        for kw in KEYWORDS:
+            items = fetch_completed_items(kw)
+            all_items.extend(items)
+            print(f"Total items so far: {len(all_items)}")
+
+        print(f"Total items collected: {len(all_items)}")
+
+        ranking, analysis_text = analyze_items(all_items)
+
+        response = {
+            "ranking": ranking,
+            "analysis": analysis_text,
+            "total_items": len(all_items),
+            "keywords_searched": KEYWORDS,
+            "pandas_used": PANDAS_AVAILABLE,
+            "success": True
+        }
+
+        print(f"Returning response: {response}")
+        return jsonify(response)
+
+    except Exception as e:
+        print(f"Error in fetch_ebay_data endpoint: {e}")
+        return jsonify({
+            "error": "Internal server error",
+            "message": str(e),
+            "ranking": [],
+            "analysis": "エラーが発生しました。ログを確認してください。",
+            "success": False
+        }), 200
+
+# エラーハンドラー
+@app.errorhandler(500)
+def internal_error(error):
+    print(f"Internal server error: {error}")
+    return jsonify({"error": "Internal server error", "message": str(error)}), 500
+
+def request_with_retry(url, headers, max_retry=3):
+    for i in range(max_retry):
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 500:
+            retry_after = int(response.headers.get("Retry-After", "3"))
+            print(f"[Retry {i+1}] 500 error. Retrying in {retry_after} seconds...")
+            time.sleep(retry_after)
+            continue
+        return response
+    return response  # 最終結果を返す（成功または失敗）
+
+@app.route("/test-ebay-api", methods=["GET"])
+def test_ebay_api():
+    try:
+        if not EBAY_APP_ID:
+            return jsonify({"error": "EBAY_APP_ID not configured"}), 400
+
+        test_keyword = "test"
+        url = (
+            "https://svcs.ebay.com/services/search/FindingService/v1"
+            "?SERVICE-VERSION=1.0.0"
+            "&RESPONSE-DATA-FORMAT=JSON"
+            f"&keywords={test_keyword}"
+            "&paginationInput.entriesPerPage=1"
+            f"&_t={int(time.time())}"
+        )
+
+        headers = {
+            "X-EBAY-SOA-OPERATION-NAME": "findItemsByKeywords",
+            "X-EBAY-SOA-SECURITY-APPNAME": EBAY_APP_ID,
+            "X-EBAY-SOA-REQUEST-DATA-FORMAT": "JSON",
+            "Content-Type": "application/json",
+            "User-Agent": "Python-eBay-Client/1.0"
+        }
+
+        response = request_with_retry(url, headers)
+
+        return jsonify({
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "content": response.text[:1000],
+            "app_id": EBAY_APP_ID[:10] + "...",
+            "url": response.request.url,
+            "request_headers": dict(response.request.headers)
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # if __name__ == "__main__":
 #     app.run(debug=True)
